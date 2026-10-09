@@ -1,0 +1,90 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>GrowNomy browser checks</title>
+<style>body{margin:12px;font:14px system-ui;background:#e4e9e6;color:#172820}button,select,input{padding:9px;margin:4px}iframe{display:block;border:0;background:#172820}pre{white-space:pre-wrap;max-width:1100px;max-height:100px;overflow:auto}</style>
+<label>Viewport <select id="size"><option>1440x900</option><option>1920x1080</option><option>768x1024</option><option>360x800</option><option>390x844</option><option>430x932</option><option>844x390</option></select></label>
+<label><input type="checkbox" id="still">Reduced motion path</label>
+<button id="load">Load viewport</button><button id="suite">Run browser suite</button>
+<label>Journey <input id="progress" type="number" min="0" max="100" value="0"></label><button id="seek">Go to position</button>
+<output id="status">Ready</output><pre id="report"></pre><iframe id="site" title="GrowNomy preview"></iframe>
+<script>
+const frame=document.getElementById('site'),status=document.getElementById('status'),report=document.getElementById('report');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(predicate,label,timeout=18000){const start=performance.now();while(!predicate()){if(performance.now()-start>timeout)throw Error(label+' timed out');await sleep(40)}}
+async function load(size,still=false){
+ const [w,h]=size.split('x').map(Number);frame.width=w;frame.height=h;
+ frame.src='/?qa='+Date.now()+(still?'&motion=still':'');
+ await new Promise(resolve=>frame.onload=resolve);
+ await until(()=>frame.contentDocument.querySelector('.cinema')?.dataset.cameraMode==='sequence'||frame.contentDocument.querySelector('.cinema')?.dataset.cameraMode==='static','Initial frame');
+ return frame.contentWindow;
+}
+function seek(percent){const win=frame.contentWindow,section=win.document.querySelector('.cinema');win.scrollTo({top:(section.offsetHeight-win.innerHeight)*percent/100,behavior:'instant'})}
+function inspect(win){
+ const d=win.document,s=d.querySelector('.cinema'),p=d.querySelector('.screen-portal'),canvas=d.querySelector('canvas');
+ const matrix=new win.DOMMatrix(win.getComputedStyle(p).transform),w=p.offsetWidth,h=parseFloat(win.getComputedStyle(p).height);
+ const actual=[[0,0],[w,0],[w,h],[0,h]].map(([x,y])=>{const v=new win.DOMPoint(x,y,0,1).matrixTransform(matrix);return [v.x/v.w,v.y/v.w]});
+ const expected=JSON.parse(s.dataset.screenCorners);
+ const error=Math.max(...actual.flatMap((p,i)=>p.map((n,j)=>Math.abs(n-expected[i][j]))));
+ const sample=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+ let min=255,max=0;for(let i=0;i<sample.length;i+=4096){min=Math.min(min,sample[i]);max=Math.max(max,sample[i])}
+ const overflow=d.documentElement.scrollWidth-win.innerWidth;
+ return {viewport:[win.innerWidth,win.innerHeight],position:Number(s.dataset.cameraPosition),frame:Number(s.dataset.cameraFrame),cornerError:error,pixelRange:max-min,overflow,decoded:Number(s.dataset.decodedFrames),mode:s.dataset.cameraMode};
+}
+async function suite(){
+ const results=[];document.getElementById('suite').disabled=true;
+ const check=(ok,message)=>{if(!ok)throw Error(message)};
+ try{
+  for(const size of ['1440x900','1920x1080','768x1024','360x800','390x844','430x932','844x390']){
+   status.textContent='Testing '+size;const win=await load(size),d=win.document,s=d.querySelector('.cinema');
+   // Interrupt the intro immediately, then exercise the same trajectory in both directions.
+   const before=Number(s.dataset.cameraPosition);seek(9);await sleep(40);
+   check(Math.abs(Number(s.dataset.cameraPosition)-before)<.3,'Intro discontinuity');
+   const samples=[];
+   for(const percent of [12,33,55,78,46,18,78]){
+    seek(percent);const target=1+2*Math.min(1,percent/78);
+    await until(()=>Math.abs(Number(s.dataset.cameraPosition)-target)<.015,'Camera at '+percent);
+    const sample=inspect(win);samples.push(sample);
+    check(sample.cornerError<.75,'Screen alignment: '+JSON.stringify(sample));check(sample.pixelRange>35,'Blank camera canvas');
+    check(sample.overflow<=1,'Horizontal overflow');check(sample.decoded<=16,'Decoded cache limit');
+   }
+   const content=d.querySelector('.screen-content').getBoundingClientRect(),chat=d.querySelector('.screen-chat').getBoundingClientRect();
+   check(content.left>=-1&&content.right<=win.innerWidth+1,'Screen content width');
+   check(chat.top>=0&&chat.bottom<=win.innerHeight+1,'Screen chat height');
+   const log=d.getElementById('storymessages'),count=log.children.length;
+   seek(15);await sleep(600);const paused=log.textContent;await sleep(300);
+   check(log.textContent===paused,'Hidden conversation still typing');
+   d.querySelector('.replay-camera').click();
+   await until(()=>Number(s.dataset.cameraPosition)<1.01,'Replay');
+   check(log.children.length===1,'Replay did not reset conversation');
+   d.querySelector('[data-prompt="AI assistant"]').click();
+   check(d.getElementById('demoMessages').textContent.includes('existing website'),'Assistant prompt');
+   for(const answer of ['Example studio','More enquiries','Norway','Example Person, example@example.com']){
+    d.getElementById('demoInput').value=answer;
+    d.getElementById('demoForm').requestSubmit();
+   }
+   check(d.getElementById('demoLead').textContent.includes('SAMPLE PROJECT'),'Demo completion');
+   d.getElementById('reset').click();
+   check(d.getElementById('demoMessages').children.length===1&&!d.getElementById('demoLead').textContent,'Demo reset');
+   d.querySelector('[data-service="Website"]').click();
+   check(d.getElementById('service').value==='Website','Service selection');
+   check(!d.getElementById('contact').checkValidity(),'Empty brief form validation');
+   d.getElementById('contactName').value='Example Person';d.getElementById('contactBusiness').value='Example studio';
+   d.getElementById('contactEmail').value='invalid';check(!d.getElementById('contact').checkValidity(),'Email validation');
+   d.getElementById('contactEmail').value='example@example.com';check(d.getElementById('contact').checkValidity(),'Valid brief rejected');
+   check(d.getElementById('soundToggle').getAttribute('aria-pressed')==='false','Sound not opt-in');
+   // Check every section after scrolling reveals it.
+   for(const el of d.querySelectorAll('main>section,footer')){el.scrollIntoView({behavior:'instant'});await sleep(80);check(d.documentElement.scrollWidth<=win.innerWidth+1,'Section overflow')}
+   results.push({size,passed:true,samples});report.textContent=JSON.stringify(results,null,2);
+  }
+  for(const size of ['1440x900','390x844']){
+   const win=await load(size,true);await sleep(300);const s=win.document.querySelector('.cinema'),sample=inspect(win);
+   check(sample.mode==='static'&&sample.position===1,'Reduced motion path');
+   check(s.offsetHeight===win.innerHeight,'Reduced motion scroll length');
+   results.push({size,reducedMotion:true,passed:true,sample});
+  }
+  status.textContent='PASS: 7 viewports, forward/reverse, intro interruption, replay, geometry, pixels, cache, demo, validation and 2 static layouts';
+ }catch(error){status.textContent='FAIL: '+error.message;results.push({passed:false,error:error.message})}
+ finally{report.textContent=JSON.stringify(results,null,2);document.getElementById('suite').disabled=false}
+}
+document.getElementById('load').onclick=()=>load(document.getElementById('size').value,document.getElementById('still').checked);
+document.getElementById('seek').onclick=()=>seek(Number(document.getElementById('progress').value));
+document.getElementById('suite').onclick=suite;
+</script></html>

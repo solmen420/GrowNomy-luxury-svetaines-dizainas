@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>GrowNomy studio production</title>
+<style>body{font:16px system-ui;background:#192b23;color:#f2efe7;margin:24px}button,select{padding:12px;margin:8px}canvas{max-width:800px;max-height:65vh;display:block}output{display:block;margin:12px}</style>
+<h1>GrowNomy studio production</h1>
+<label>Composition <select id="variant"><option>desktop</option><option>mobile</option></select></label>
+<button id="test">Render control frames</button><button id="render">Render full sequence</button>
+<output id="status">Ready</output><div id="preview"></div>
+<script type="module">
+import {createStudio} from './studio-scene.js';
+const status=document.getElementById('status');
+async function run(test){
+ const variant=document.getElementById('variant').value,mobile=variant==='mobile';
+ const width=mobile?720:1600,height=mobile?1280:1000,count=181;
+ document.querySelectorAll('button').forEach(b=>b.disabled=true);
+ let scene;
+ try{
+  status.textContent='Building studio';scene=await createStudio(width,height,mobile);
+  document.getElementById('preview').replaceChildren(scene.canvas);
+  const frames=[],indices=test?[0,45,90,135,180]:Array.from({length:count},(_,i)=>i);
+  for(const i of indices){
+   const corners=scene.render(i/90);frames[i]=corners;
+   const blob=await new Promise(resolve=>scene.canvas.toBlob(resolve,'image/webp',.88));
+   if(!blob)throw Error('Frame export failed');
+   const response=await fetch('/__render/'+variant+'/'+String(i).padStart(3,'0')+'.webp',{method:'POST',body:blob});
+   if(!response.ok)throw Error('Could not save frame');
+   status.textContent='Saved '+variant+' frame '+i+' / 180';
+   await new Promise(resolve=>requestAnimationFrame(resolve));
+  }
+  if(!test){
+   const response=await fetch('/__render/'+variant+'/track.json',{method:'POST',body:JSON.stringify({width,height,introFrame:90,fps:30,screenRatio:3.32/2.024,frames})});
+   if(!response.ok)throw Error('Could not save track');
+  }
+  status.textContent=(test?'Control frames':'Sequence')+' complete: '+variant;
+ }catch(error){status.textContent='Error: '+error.message}
+ finally{scene?.dispose();document.querySelectorAll('button').forEach(b=>b.disabled=false)}
+}
+document.getElementById('test').onclick=()=>run(true);
+document.getElementById('render').onclick=()=>run(false);
+</script></html>
